@@ -85,54 +85,50 @@ fastify.get('/ebs-volume-id', async (request, reply) => {
 /*
 * health check calls this for an instance that fails health check
 */
-fastify.route({
-  method: 'DELETE',
-  path: '/instance-id',
-  handler: async function (request, reply) {
-    var result = null
-    // get instance id from request
-    const instanceId = request.query.instance_id
-    // get hostnames
-    const hostnamesStr = await getState('hostnames')
-    if(typeof hostnamesStr === 'object') {
-      reply.code(500)
-      return hostnamesStr
-    }
-    const hostnames = hostnamesStr.split(' ')
-    const hostnameVolumeIdMap = new Map()
-    for(var i = 0; i < hostnames.length; i++) {
-      const hostname = hostnames[i]
-      // with hostnames, get volume ids
-      const volumeId = await getState(hostname + '_to_volume_id')
-      if(typeof volumeId === 'object') {
-        reply.code(500)
-        return volumeId
-      }
-      // with hostnames, get instance ids
-      const matchedInstanceId = await getState(hostname + '_to_instance_id')
-      if(typeof matchedInstanceId === 'object') {
-        reply.code(500)
-        return matchedInstanceId
-      }
-      // compare instanceId to matchedInstanceId
-      if(instanceId === matchedInstanceId) {
-        const unsetResult = await setState(hostname + '_to_instance_id', '')
-        if(typeof unsetResult === 'object') {
-          reply.code(500)
-          return unsetResult
-        }
-        result = 'Free volume ID ' + volumeId + 'successful'
-      }
-    }
-    if(!result) {
-      reply.code(500)
-      return 'Instance ID ' + instanceId + ' not associated with any volume'
-    }
-    reply
-      .code(200)
-      .header('Content-Type', 'application/text; charset=utf-8')
-      .send(result)
+fastify.delete('/instance-id', async (request, reply) => {
+  var result = null
+  // get instance id from request
+  const instanceId = request.query.instance_id
+  // get hostnames
+  const hostnamesStr = await getState('hostnames')
+  if(typeof hostnamesStr === 'object') {
+    reply.code(500)
+    return hostnamesStr
   }
+  const hostnames = hostnamesStr.split(' ')
+  const hostnameVolumeIdMap = new Map()
+  for(var i = 0; i < hostnames.length; i++) {
+    const hostname = hostnames[i]
+    // with hostnames, get volume ids
+    const volumeId = await getState(hostname + '_to_volume_id')
+    if(typeof volumeId === 'object') {
+      reply.code(500)
+      return volumeId
+    }
+    // with hostnames, get instance ids
+    const matchedInstanceId = await getState(hostname + '_to_instance_id')
+    if(typeof matchedInstanceId === 'object') {
+      reply.code(500)
+      return matchedInstanceId
+    }
+    // compare instanceId to matchedInstanceId
+    if(instanceId === matchedInstanceId) {
+      const unsetResult = await setState(hostname + '_to_instance_id', '')
+      if(typeof unsetResult === 'object') {
+        reply.code(500)
+        return unsetResult
+      }
+      result = 'Successfully freed volume ID ' + volumeId
+    }
+  }
+  if(!result) {
+    reply.code(500)
+    return 'Instance ID ' + instanceId + ' not associated with any volume'
+  }
+  reply
+    .code(200)
+    .header('Content-Type', 'application/text; charset=utf-8')
+    .send(result)
 })
 
 fastify.get('/is-leader', async (request, reply) => {
