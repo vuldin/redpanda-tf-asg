@@ -10,13 +10,7 @@ Details on installing Terraform can be found [here](https://www.terraform.io/dow
 
 ## Variables
 
-Copy the variable sample file:
-
-```bash
-cp terraform.tfvars.sample terraform.tfvars
-```
-
-Make changes to the newly-created file based on your environment. Here are some notes on each variable:
+Make changes to the variables found in `main.tf` based on your environment. Here are some notes on each variable:
 
 `hostnames         = ["rp0", "rp1", "rp2"]`
 Determines how many redpanda nodes are deployed and each node's hostname.
@@ -62,6 +56,8 @@ Once you are ready, run the following command to create/update the infrastructur
 ```bash
 terraform apply
 ```
+
+> Note: For now the Elastic IP must be manually assigned to the bootstrap EC2 instance. See [this issue](https://github.com/vuldin/redpanda-tf-asg/issues/1) for details and to track progress.
 
 ## Clean up
 
