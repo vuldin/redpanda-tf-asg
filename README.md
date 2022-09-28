@@ -57,8 +57,6 @@ Once you are ready, run the following command to create/update the infrastructur
 terraform apply
 ```
 
-> Note: For now the Elastic IP must be manually assigned to the bootstrap EC2 instance. See [this issue](https://github.com/vuldin/redpanda-tf-asg/issues/1) for details and to track progress.
-
 ## Clean up
 
 ```bash

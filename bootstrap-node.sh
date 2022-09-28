@@ -2,15 +2,20 @@
 
 set -ex
 
-INTERNAL_IP=`wget -q -O - http://169.254.169.254/latest/meta-data/local-ipv4`
-REGION=$(curl http://169.254.169.254/latest/meta-data/placement/region)
+INSTANCE_ID=`curl -sLf "http://169.254.169.254/latest/meta-data/instance-id"`
+REGION=`curl -sLf http://169.254.169.254/latest/meta-data/placement/region`
 
 yum update -y
-curl https://get.volta.sh | bash
-/.volta/bin/volta install node@${NODEJS_VERSION}
-mkdir bootstrap-node && cd bootstrap-node
-/root/.volta/bin/npm init -y
-/root/.volta/bin/npm i @aws-sdk/client-s3 @aws-sdk/lib-storage fastify node-fetch
+sudo -u ec2-user curl https://get.volta.sh | sudo -u ec2-user bash
+sudo -u ec2-user /home/ec2-user/.volta/bin/volta install node@${NODEJS_VERSION}
+cd /home/ec2-user
+sudo -u ec2-user mkdir bootstrap-node && cd bootstrap-node
+sudo -u ec2-user /home/ec2-user/.volta/bin/npm init -y
+sudo -u ec2-user /home/ec2-user/.volta/bin/npm i @aws-sdk/client-s3 @aws-sdk/lib-storage fastify node-fetch
+
+# associate elastic IP with this instance (with elastic IP)
+sudo -u ec2-user aws configure set region $REGION
+sudo -u ec2-user aws ec2 associate-address --instance-id "$INSTANCE_ID" --public-ip ${EIP}
 
 cat <<EOF > index.js
 const { GetObjectCommand, S3Client } = require('@aws-sdk/client-s3')
@@ -218,4 +223,4 @@ startServer()
 
 EOF
 
-/root/.volta/bin/node index.js
+sudo -u ec2-user /home/ec2-user/.volta/bin/node index.js
