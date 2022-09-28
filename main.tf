@@ -3,7 +3,9 @@ locals {
   hostnames         = ["apple", "bacon", "carrot"]
   hostnames_string  = join(" ", local.hostnames)
   hostname_content  = ""
-  domain            ="jlp.dev.vectorized.cloud"
+  domain            = "dev.vectorized.cloud"
+  domain_zone_id    = "Z03100913AM3M9FSF30OG"
+  subdomain         = "jlp"
   region            = "us-east-2"
   availability_zone = "us-east-2a"
   bucket_name       = "jlp-rp-bucket"

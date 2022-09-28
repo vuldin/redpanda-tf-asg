@@ -74,12 +74,12 @@ resource "aws_iam_instance_profile" "bootstrap_profile" {
 }
 
 resource "aws_launch_configuration" "bootstrap_launch_config" {
-  name            = "jlp-bootstrap-launch-config"
-  image_id        = "ami-0f924dc71d44d23e2"
-  instance_type   = "t2.micro"
-  key_name        = local.key_name
-  iam_instance_profile   = aws_iam_instance_profile.bootstrap_profile.name
-  security_groups = [aws_security_group.bootstrap_security_group.name]
+  name                 = "jlp-bootstrap-launch-config"
+  image_id             = "ami-0f924dc71d44d23e2"
+  instance_type        = "t2.micro"
+  key_name             = local.key_name
+  iam_instance_profile = aws_iam_instance_profile.bootstrap_profile.name
+  security_groups      = [aws_security_group.bootstrap_security_group.name]
   user_data = templatefile("${path.module}/bootstrap-node.sh", {
     NODEJS_VERSION = local.nodejs_version
     BUCKET         = local.bucket_name

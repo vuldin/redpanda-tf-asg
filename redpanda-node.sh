@@ -29,6 +29,10 @@ EXTERNAL_HOSTS=(jlp-external-0.ddns.net jlp-external-1.ddns.net jlp-external-2.d
 # If replacing a node, you will want to hard-code this value to the same node_id as the broker being replaced.
 # TODO standardize on curl rather than wget
 INDEX=`wget -q -O - http://169.254.169.254/latest/meta-data/ami-launch-index`
+
+# sleep later instances in a launch to help ensure bootstrap state updates are isolated
+sleep $((4*$INDEX))
+
 INTERNAL_IP=`wget -q -O - http://169.254.169.254/latest/meta-data/local-ipv4`
 #EXTERNAL_IP=`wget -q -O - http://169.254.169.254/latest/meta-data/public-ipv4`
 
