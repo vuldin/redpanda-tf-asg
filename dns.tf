@@ -26,3 +26,22 @@ resource "aws_route53_record" "bootstrap" {
   ttl     = 300
   records = ["${aws_eip.bootstrap.public_ip}"]
 }
+
+resource "aws_eip" "redpanda_nodes" {
+  for_each = toset(local.hostnames)
+  tags = {
+    Name = "${local.cluster_id}-${each.value}"
+  }
+}
+
+resource "aws_route53_record" "redpanda" {
+  allow_overwrite = true
+  zone_id = aws_route53_zone.subdomain.zone_id
+  for_each = toset(local.hostnames)
+  name    = "${each.value}.${aws_route53_zone.subdomain.name}"
+
+  type    = "A"
+  ttl     = 300
+  #records = ["${aws_eip.redpanda_nodes["${local.cluster_id}-${each.value}"].public_ip}"]
+  records = ["${aws_eip.redpanda_nodes["${each.value}"].public_ip}"]
+}

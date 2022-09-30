@@ -1,5 +1,5 @@
-resource "aws_security_group" "bootstrap_security_group" {
-  name = "${local.subdomain}_bootstrap_security_group"
+resource "aws_security_group" "bootstrap" {
+  name = "${local.subdomain}-bootstrap"
 
   ingress {
     from_port   = 22
@@ -23,24 +23,22 @@ resource "aws_security_group" "bootstrap_security_group" {
   }
 }
 
-resource "aws_iam_policy" "bootstrap_policy" {
-  name        = "${local.subdomain}_bootstrap_policy"
+resource "aws_iam_policy" "bootstrap" {
+  name        = "${local.subdomain}-bootstrap"
   path        = "/"
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      // s3 object access
       {
         "Effect": "Allow",
         "Action": [
-            "s3:GetObject",
-            "s3:PutObject",
+          "s3:GetObject",
+          "s3:PutObject",
         ],
         "Resource": [
-            "arn:aws:s3:::${local.bucket_name}/*"
+          "arn:aws:s3:::${local.bucket_name}/*"
         ]
       },
-      // associate an elastic IP to this instance
       {
         "Effect": "Allow",
         "Action": [
@@ -50,25 +48,12 @@ resource "aws_iam_policy" "bootstrap_policy" {
           "*",
         ]
       },
-      /*
-      // for assigning instance IP to route53
-      {
-        "Effect": "Allow",
-        "Action": "ec2:DescribeTags",
-        "Resource": "*"
-      },
-      {
-        "Effect": "Allow",
-        "Action": "route53:ChangeResourceRecordSets",
-        "Resource": "arn:aws:route53:::hostedzone/${aws_route53_zone.subdomain.id}"
-      },
-      */
     ]
   })
 }
 
-resource "aws_iam_role" "bootstrap_role" {
-  name = "${local.subdomain}_bootstrap_role"
+resource "aws_iam_role" "bootstrap" {
+  name = "${local.subdomain}-bootstrap"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -85,29 +70,29 @@ resource "aws_iam_role" "bootstrap_role" {
   })
 }
 
-resource "aws_iam_policy_attachment" "bootstrap_policy_role" {
-  name       = "${local.subdomain}_bootstrap_attachment"
-  roles      = [aws_iam_role.bootstrap_role.name]
-  policy_arn = aws_iam_policy.bootstrap_policy.arn
+resource "aws_iam_policy_attachment" "bootstrap" {
+  name       = "${local.subdomain}-bootstrap"
+  roles      = [aws_iam_role.bootstrap.name]
+  policy_arn = aws_iam_policy.bootstrap.arn
 }
 
-resource "aws_iam_instance_profile" "bootstrap_profile" {
-  name = "${local.subdomain}_bootstrap_profile"
-  role = aws_iam_role.bootstrap_role.name
+resource "aws_iam_instance_profile" "bootstrap" {
+  name = "${local.subdomain}-bootstrap"
+  role = aws_iam_role.bootstrap.name
 }
 
-resource "aws_launch_configuration" "bootstrap_launch_config" {
-  name_prefix          = "${local.subdomain}-"
-  image_id             = "ami-0f924dc71d44d23e2"
-  instance_type        = "t2.micro"
-  key_name             = local.key_name
-  iam_instance_profile = aws_iam_instance_profile.bootstrap_profile.name
-  security_groups      = [aws_security_group.bootstrap_security_group.id]
+resource "aws_launch_configuration" "bootstrap" {
+  name_prefix                 = "${local.subdomain}-bootstrap"
+  image_id                    = "ami-0f924dc71d44d23e2"
+  instance_type               = "t2.micro"
+  key_name                    = local.key_name
+  iam_instance_profile        = aws_iam_instance_profile.bootstrap.name
+  security_groups             = [aws_security_group.bootstrap.id]
   associate_public_ip_address = true
-  user_data = templatefile("${path.module}/bootstrap-node.sh", {
+  user_data                   = templatefile("${path.module}/bootstrap-node.sh", {
     NODEJS_VERSION = local.nodejs_version
     BUCKET         = local.bucket_name
-    ROLE           = aws_iam_role.bootstrap_role.name
+    ROLE           = aws_iam_role.bootstrap.name
     EIP            = aws_eip.bootstrap.public_ip
   })
 
@@ -116,9 +101,9 @@ resource "aws_launch_configuration" "bootstrap_launch_config" {
   }
 }
 
-resource "aws_autoscaling_group" "bootstrap_asg" {
+resource "aws_autoscaling_group" "bootstrap" {
   availability_zones        = ["${local.availability_zone}"]
-  name                      = "${local.subdomain}_bootstrap_asg"
+  name                      = "${local.subdomain}-bootstrap"
   desired_capacity          = 1
   min_size                  = 1
   max_size                  = 1
@@ -126,15 +111,15 @@ resource "aws_autoscaling_group" "bootstrap_asg" {
   health_check_type         = "EC2"
   force_delete              = true
   termination_policies      = ["OldestInstance"]
-  launch_configuration      = aws_launch_configuration.bootstrap_launch_config.id
+  launch_configuration      = aws_launch_configuration.bootstrap.id
 
   depends_on = [
-    aws_s3_bucket.bootstrap_bucket
+    aws_s3_bucket.bootstrap
   ]
 
   tag {
         key = "Name"
-        value = "${local.subdomain}_bootstrap"
+        value = "${local.subdomain}-bootstrap"
         propagate_at_launch = true
     }
 }

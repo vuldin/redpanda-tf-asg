@@ -57,6 +57,8 @@ Once you are ready, run the following command to create/update the infrastructur
 terraform apply
 ```
 
+The above command takes around 1 minutes to complete, and DNS names should resolve in ~30 seconds.
+
 ## Clean up
 
 ```bash
