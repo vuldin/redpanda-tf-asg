@@ -56,7 +56,7 @@ resource "aws_iam_policy" "redpanda" {
         "Action": [
           "ec2:AssociateAddress",
           "ec2:AttachVolume",
-          "ec2:DescribeTags",
+          "ec2:DescribeVolumeStatus",
           "ec2:CreateTags",
         ],
         "Resource": [
@@ -100,7 +100,7 @@ resource "aws_launch_configuration" "redpanda" {
   name_prefix                 = "${local.subdomain}-redpanda"
   image_id                    = "ami-0568773882d492fc8"
   instance_type               = "i3.large"
-  key_name                    = "jlp"
+  key_name                    = local.key_name
   iam_instance_profile        = aws_iam_instance_profile.redpanda.name
   security_groups             = [aws_security_group.redpanda.id]
   associate_public_ip_address = true # TODO is this needed with eip?

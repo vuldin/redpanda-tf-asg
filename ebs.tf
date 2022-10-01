@@ -7,6 +7,6 @@ resource "aws_ebs_volume" "redpanda_volumes" {
   throughput        = 125
 
   tags = {
-    Name = "${each.value}"
+    Name = "${local.cluster_id}-${each.value}"
   }
 }

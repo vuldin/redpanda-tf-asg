@@ -185,44 +185,6 @@ fastify.get('/general-info', async (_, reply) => {
   }
 })
 
-/*
- * redpanda instances will look for redpanda.yaml in EBS volume to determine node_id
- * if redpanda.yaml exists, then node_id will be pulled and re-used
- * if there is no redpanda.yaml, then node_id will be set to ami launch index
- * instance will call this endpoint passing node_id and is_reusing_node_id query params
- */
-fastify.get('/is-leader', async (request, reply) => {
-  let result = null
-  const thisNodeId = Number(request.query.node_id)
-  const doesClusterExist = Number(request.query.is_reusing_node_id)
-  if(doesClusterExist === 0) {
-    // terraform start, empty EBS volume, leader is determined by index
-    result = thisNodeId === 0 ? '1' : '0'
-  } else {
-    // subsequent start, leader is determined by health_overview call to other nodes
-    // TODO each instance could read seed_servers to get hostnames to avoid calling this endpoint
-    const hostnamesStr = await getState('hostnames')
-    if(typeof hostnamesStr === 'object') {
-      reply.code(500)
-      return hostnamesStr
-    }
-    const hostnames = hostnamesStr.split(' ')
-    const hostname = hostnames.filter((_, index) => index !== thisNodeId)[0]
-    const domain = await getState('domain')
-    const subdomain = await getState('subdomain')
-    const healthOverviewUrl = 'http://internal.' + hostname + '.' + subdomain + domain + ':9644/v1/cluster/health_overview'
-    const response = await fetch(healthOverviewUrl)
-
-    const data = await response.json()
-    const leaderNodeId = data.controller_id
-    result = thisNodeId === leaderNodeId ? '1' : '0'
-  }
-  reply
-    .code(200)
-    .header('Content-Type', 'application/text; charset=utf-8')
-    .send(result)
-})
-
 async function getState(Key) {
   const streamToString = (stream) =>
     new Promise((resolve, reject) => {
