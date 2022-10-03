@@ -1,33 +1,78 @@
 #!/bin/bash
 
 set -ex
+yum update -y
 
+# run the rest of this script as ec2-user
+tail -n +$[LINENO+2] $0 | exec sudo -u ec2-user bash
+exit $?
+set -ex
 INSTANCE_ID=`curl -s http://169.254.169.254/latest/meta-data/instance-id`
 REGION=`curl -s http://169.254.169.254/latest/meta-data/placement/region`
 
-yum update -y
-sudo -u ec2-user curl https://get.volta.sh | sudo -u ec2-user bash
-sudo -u ec2-user /home/ec2-user/.volta/bin/volta install node@${NODEJS_VERSION}
-cd /home/ec2-user
-sudo -u ec2-user mkdir bootstrap-node && cd bootstrap-node
-sudo -u ec2-user /home/ec2-user/.volta/bin/npm init -y
-sudo -u ec2-user /home/ec2-user/.volta/bin/npm i @aws-sdk/client-s3 @aws-sdk/lib-storage fastify node-fetch
+cd $HOME
+curl https://get.volta.sh | sudo -u ec2-user bash
+/home/ec2-user/.volta/bin/volta install node@${NODEJS_VERSION}
+mkdir bootstrap-node && cd bootstrap-node
+/home/ec2-user/.volta/bin/npm init -y es6
+/home/ec2-user/.volta/bin/npm i @aws-sdk/client-ec2 @aws-sdk/client-s3 @aws-sdk/lib-storage fastify node-fetch
 
 # update DNS
-sudo -u ec2-user aws configure set region $REGION
-sudo -u ec2-user aws ec2 associate-address --instance-id "$INSTANCE_ID" --public-ip ${EIP}
+aws configure set region $REGION
+aws ec2 associate-address --instance-id "$INSTANCE_ID" --public-ip ${EIP}
 
-sudo -u ec2-user cat <<EOF > index.js
-const { GetObjectCommand, S3Client } = require('@aws-sdk/client-s3')
-const { Upload } = require('@aws-sdk/lib-storage')
-const fastify = require('fastify')({ logger: true })
-const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args))
+cat <<EOF > index.js
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import {
+  DescribeInstanceStatusCommand,
+  EC2Client,
+  TerminateInstancesCommand,
+} from '@aws-sdk/client-ec2'
+import { Upload } from '@aws-sdk/lib-storage'
+import Fastify from 'fastify'
+import fetch from 'node-fetch'
+
+const HEALTH_CHECK_FREQUENCY_MS = 10 * 1000
+const HEALTH_CHECK_FAILURE_LIMIT = 3
 
 const region = '$REGION'
-// TODO this variable will not be set if bootstrap instance is replaced
 const Bucket = '${BUCKET}'
 
-const client = new S3Client({ region })
+const fastify = Fastify({ logger: true })
+const s3Client = new S3Client({ region })
+const ec2Client = new EC2Client({ region })
+
+// get general cluster info
+const clusterId = await getState('cluster_id')
+const domain = await getState('domain')
+const hostnamesStr = await getState('hostnames')
+const mountDir = await getState('mount_dir')
+const organization = await getState('organization')
+const generalInfo = {
+  clusterId,
+  domain,
+  hostnames: hostnamesStr,
+  mountDir,
+  organization,
+}
+
+// get hostname info
+const hostnames = hostnamesStr.split(' ')
+const nodeDetails = new Map()
+for(let i = 0; i < hostnames.length; i++) {
+  const hostname = hostnames[i]
+  let hostnameInfo = await getState(hostname + '_info')
+  const { volume_id: volumeId, eip } = JSON.parse(hostnameInfo)
+  nodeDetails.set(hostname, {
+    hostname,
+    volumeId,
+    eip,
+    url: 'http://' + hostname + '.' + domain + ':9644/public_metrics',
+  })
+}
+
+const didInstanceAlreadyFail = new Map()
+nodeDetails.forEach(({ hostname }) => didInstanceAlreadyFail.set(hostname, 0))
 
 /*
  * redpanda instances call this endpoint early in their user_data script
@@ -38,14 +83,6 @@ const client = new S3Client({ region })
 fastify.get('/node-info', async (request, reply) => {
   // get instance id from request
   const instanceId = request.query.instance_id
-  // get hostnames
-  const hostnamesStr = await getState('hostnames')
-  if(typeof hostnamesStr === 'object') {
-    reply.code(500)
-    return hostnamesStr
-  }
-  const hostnames = hostnamesStr.split(' ')
-
   const unmatchedHostnames = []
   for(let i = 0; i < hostnames.length; i++) {
     const hostname = hostnames[i]
@@ -59,20 +96,10 @@ fastify.get('/node-info', async (request, reply) => {
     if(instanceId === matchedInstanceId) {
       //reply.code(400)
       //return new Error('Instance ID ' + instanceId + ' already matches hostname ' + hostname)
-      let hostnameInfo = await getState(hostname + '_info')
-      if(typeof hostnameInfo === 'object') {
-        reply.code(500)
-        return hostnameInfo
-      }
-      const { volume_id: volumeId, eip } = JSON.parse(hostnameInfo)
       reply
         .code(200)
         .header('Content-Type', 'application/json; charset=utf-8')
-      return {
-          hostname,
-          volumeId,
-          eip,
-        }
+      return nodeDetails.get(hostname)
     }
     if(matchedInstanceId.length === 0) {
       unmatchedHostnames.push(hostname)
@@ -90,34 +117,24 @@ fastify.get('/node-info', async (request, reply) => {
     reply.code(500)
     return instanceIdResult
   }
-  let hostnameInfo = await getState(hostname + '_info')
-  if(typeof hostnameInfo === 'object') {
-    reply.code(500)
-    return hostnameInfo
-  }
-  const { volume_id: volumeId, eip } = JSON.parse(hostnameInfo)
   reply
     .code(200)
     .header('Content-Type', 'application/json; charset=utf-8')
-    .send({
-      hostname,
-      volumeId,
-      eip,
-    })
+  return nodeDetails.get(hostname)
 })
 
 /*
  * health check calls this for an instance that fails health check
  */
-fastify.delete('/instance-id', async (request, reply) => {
-  let result = null
-  // get instance id from request
-  const instanceId = request.query.instance_id
+async function deleteInstanceLink(instanceId) {
+  let unsetHostname = null
   // get hostnames
   const hostnamesStr = await getState('hostnames')
   if(typeof hostnamesStr === 'object') {
-    reply.code(500)
-    return hostnamesStr
+    return {
+      code: 500,
+      response: hostnamesStr,
+    }
   }
   const hostnames = hostnamesStr.split(' ')
   for(let i = 0; i < hostnames.length; i++) {
@@ -125,64 +142,50 @@ fastify.delete('/instance-id', async (request, reply) => {
     // get matched instance ids
     const matchedInstanceId = await getState(hostname + '_to_instance_id')
     if(typeof matchedInstanceId === 'object') {
-      reply.code(500)
-      return matchedInstanceId
+      return {
+        code: 500,
+        response: matchedInstanceId,
+      }
     }
     if(instanceId === matchedInstanceId) {
       const unsetResult = await setState(hostname + '_to_instance_id', '')
       if(typeof unsetResult === 'object') {
-        reply.code(500)
-        return unsetResult
+        return {
+          code: 500,
+          response: unsetResult,
+        }
       }
-      result = hostname
+      unsetHostname = hostname
     }
   }
-  if(!result) {
-    reply.code(500)
-    return 'Instance ID ' + instanceId + ' not associated with any hostname'
+  if(!unsetHostname) {
+    return {
+      code: 500,
+      response: 'Instance ID ' + instanceId + ' not associated with any hostname',
+    }
   }
-  reply
-    .code(200)
-    .header('Content-Type', 'application/text; charset=utf-8')
-    .send('Disconnected instance ID ' + instanceId + ' from hostname ' + result)
+  return {
+    code: 200,
+    response: 'Disconnected instance ID ' + instanceId + ' from hostname ' + unsetHostname,
+  }
+}
+
+fastify.delete('/instance-id', async (request, reply) => {
+  // get instance id from request
+  const instanceId = request.query.instance_id
+  const result = await deleteInstanceLink(instanceId)
+  reply.code(result.code)
+  if(result.code === 200) {
+    reply.header('Content-Type', 'application/text; charset=utf-8')
+  }
+  return result.response
 })
 
 fastify.get('/general-info', async (_, reply) => {
-  const clusterId = await getState('cluster_id')
-  if(typeof clusterId === 'object') {
-    reply.code(500)
-    return clusterId
-  }
-  const domain = await getState('domain')
-  if(typeof domain === 'object') {
-    reply.code(500)
-    return domain
-  }
-  const hostnames = await getState('hostnames')
-  if(typeof hostnames === 'object') {
-    reply.code(500)
-    return hostnames
-  }
-  const mountDir = await getState('mount_dir')
-  if(typeof mountDir === 'object') {
-    reply.code(500)
-    return mountDir
-  }
-  const organization = await getState('organization')
-  if(typeof organization === 'object') {
-    reply.code(500)
-    return organization
-  }
   reply
     .code(200)
     .header('Content-Type', 'application/json; charset=utf-8')
-  return {
-    clusterId,
-    domain,
-    hostnames,
-    mountDir,
-    organization,
-  }
+  return generalInfo
 })
 
 async function getState(Key) {
@@ -198,7 +201,7 @@ async function getState(Key) {
 
   const bucketParams = { Bucket, Key }
   try {
-    const data = await client.send(new GetObjectCommand(bucketParams))
+    const data = await s3Client.send(new GetObjectCommand(bucketParams))
     const remoteState = await streamToString(data.Body)
     result = remoteState
   } catch (err) {
@@ -213,7 +216,7 @@ async function setState(Key, Body) {
   if (typeof Body !== 'string' && Body.length > 0) return 'body must be valid string'
   const params = { Bucket, Key, Body }
   try {
-    const upload = new Upload({ client, params })
+    const upload = new Upload({ client: s3Client, params })
     await upload.done()
   } catch (err) {
     console.error('Error', err)
@@ -222,17 +225,78 @@ async function setState(Key, Body) {
   return 'success'
 }
 
-const startServer = async () => {
+async function handleStatus(hostname, endpoint) {
+  const instanceId = await getState(hostname + '_to_instance_id')
+  if(typeof instanceId === 'object') {
+    console.error(instanceId)
+    return
+  }
+  if(instanceId.length === 0) {
+    console.log(hostname + ' is not connected to an instance')
+    return
+  }
+
+  // get system status
+  const params = { InstanceIds: [instanceId] }
   try {
-    await fastify.listen({ host: '0.0.0.0', port: 3000 })
+    const instanceStatusResult = await ec2Client.send(new DescribeInstanceStatusCommand(params))
+    const instanceStatus = instanceStatusResult.InstanceStatuses[0]?.InstanceStatus?.Status
+    // don't delete instance if initializing
+    if (instanceStatus === 'initializing') return
+    if (instanceStatus !== 'ok') {
+      console.log(hostname + ':' + instanceId + ' failed system health check, delinking')
+      deleteInstanceLink(instanceId)
+      return
+    }
   } catch (err) {
-    fastify.log.error(err)
+    if(err.Code === 'InvalidInstanceID.NotFound') {
+      console.log(hostname + ':' + instanceId + ' doesn\'t exist, delinking')
+      deleteInstanceLink(instanceId)
+      return
+    }
+    console.error(err)
     process.exit(1)
   }
+
+  // get app status
+  try {
+  const { status } = await fetch(endpoint)
+  } catch(err) {
+    //console.error(hostname + ' ' + err.name)
+    const failCount = didInstanceAlreadyFail.get(hostname)
+    if (failCount > HEALTH_CHECK_FAILURE_LIMIT) {
+      console.log(hostname + ':' + instanceId + ' failed too many application health checks, delinking and terminating instance')
+      //await ec2Client.send(new TerminateInstancesCommand(params))
+      //deleteInstanceLink(instanceId)
+      //didInstanceAlreadyFail.set(hostname, 0)
+      return
+    } else {
+      console.log(hostname + ':' + instanceId + ' failed application health check, increasing fail count')
+      //didInstanceAlreadyFail.set(hostname, failCount + 1)
+      return
+    }
+  }
+  console.log(hostname + ':' + instanceId + ' passed health check')
 }
 
-startServer()
+const sleep = (ms) => {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+try {
+  await fastify.listen({ host: '0.0.0.0', port: 3000 })
+} catch (err) {
+  fastify.log.error(err)
+  process.exit(1)
+}
+
+while (true) {
+  nodeDetails.forEach(({ hostname, url }) => handleStatus(hostname, url))
+  await sleep(HEALTH_CHECK_FREQUENCY_MS)
+  console.log('---')
+}
 
 EOF
 
-sudo -u ec2-user /home/ec2-user/.volta/bin/node index.js
+/home/ec2-user/.volta/bin/node index.js
+exit 1

@@ -48,8 +48,8 @@ resource "aws_security_group" "redpanda" {
 resource "aws_iam_policy" "redpanda" {
   name        = "${local.subdomain}-redpanda"
   path        = "/"
-  policy = jsonencode({
-    Version = "2012-10-17"
+  policy      = jsonencode({
+    Version   = "2012-10-17"
     Statement = [
       {
         "Effect": "Allow",
@@ -68,15 +68,14 @@ resource "aws_iam_policy" "redpanda" {
 }
 
 resource "aws_iam_role" "redpanda" {
-  name = "${local.subdomain}-redpanda"
-
+  name               = "${local.subdomain}-redpanda"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [
       {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Sid    = ""
+        Action    = "sts:AssumeRole"
+        Effect    = "Allow"
+        Sid       = ""
         Principal = {
           Service = "ec2.amazonaws.com"
         }
@@ -112,11 +111,12 @@ resource "aws_launch_configuration" "redpanda" {
 resource "aws_autoscaling_group" "redpanda" {
   availability_zones        = ["${local.availability_zone}"]
   name                      = "${local.subdomain}-redpanda"
-  # TODO set cluster size according to variable
-  #desired_capacity          = count(local.hostnames)
-  desired_capacity          = 1
-  min_size                  = 1
-  max_size                  = 1
+  desired_capacity          = length(local.hostnames)
+  min_size                  = length(local.hostnames)
+  max_size                  = length(local.hostnames)
+  #desired_capacity          = 1
+  #min_size                  = 1
+  #max_size                  = 1
   health_check_grace_period = 30
   health_check_type         = "EC2"
   force_delete              = true

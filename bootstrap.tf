@@ -24,10 +24,10 @@ resource "aws_security_group" "bootstrap" {
 }
 
 resource "aws_iam_policy" "bootstrap" {
-  name        = "${local.subdomain}-bootstrap"
-  path        = "/"
+  name   = "${local.subdomain}-bootstrap"
+  path   = "/"
   policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [
       {
         "Effect": "Allow",
@@ -43,6 +43,7 @@ resource "aws_iam_policy" "bootstrap" {
         "Effect": "Allow",
         "Action": [
           "ec2:AssociateAddress",
+          "ec2:DescribeInstanceStatus"
         ],
         "Resource": [
           "*",
@@ -53,15 +54,14 @@ resource "aws_iam_policy" "bootstrap" {
 }
 
 resource "aws_iam_role" "bootstrap" {
-  name = "${local.subdomain}-bootstrap"
-
+  name               = "${local.subdomain}-bootstrap"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [
       {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Sid    = ""
+        Action    = "sts:AssumeRole"
+        Effect    = "Allow"
+        Sid       = ""
         Principal = {
           Service = "ec2.amazonaws.com"
         }
@@ -114,12 +114,12 @@ resource "aws_autoscaling_group" "bootstrap" {
   launch_configuration      = aws_launch_configuration.bootstrap.id
 
   depends_on = [
-    aws_s3_bucket.bootstrap
+    aws_s3_bucket.bootstrap,
   ]
 
   tag {
-        key = "Name"
-        value = "${local.subdomain}-bootstrap"
-        propagate_at_launch = true
-    }
+    key                 = "Name"
+    value               = "${local.subdomain}-bootstrap"
+    propagate_at_launch = true
+  }
 }

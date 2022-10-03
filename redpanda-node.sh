@@ -19,10 +19,11 @@ while [ `echo $GENERAL_INFO | jq -r '.statusCode'` = 404 ]; do
 done
 CLUSTER_ID=`echo $GENERAL_INFO | jq -r '.clusterId'`
 DOMAIN=`echo $GENERAL_INFO | jq -r '.domain'`
-HOSTNAMES=(`echo $GENERAL_INFO | jq -r '.hostnames'`)
+HOSTNAMES=`echo $GENERAL_INFO | jq -r '.hostnames'`
 ORGANIZATION=`echo $GENERAL_INFO | jq -r '.organization'`
 MOUNT_DIR=`echo $GENERAL_INFO | jq -r '.mountDir'`
 
+# TODO this loop could be improved to not always sleep the initial run
 INSTANCE_INFO='{"statusCode":404}'
 while [ `echo $INSTANCE_INFO | jq -r '.statusCode'` = 404 ]; do
   sleep 10
@@ -36,6 +37,9 @@ sudo -u ec2-user aws configure set region $REGION
 
 # update DNS
 sudo -u ec2-user aws ec2 associate-address --instance-id "$INSTANCE_ID" --public-ip $EIP
+until [ "`dig +short $HOSTNAME.$DOMAIN`" = "$EIP" ]; do
+  sleep 10
+done
 # TODO update internal DNS entry?
 
 # set instance name
@@ -59,15 +63,6 @@ done
 sleep 5 # TODO volume still not mountable immediately after ok status
 # create mount directory
 mkdir -p $MOUNT_DIR
-
-# TODO 
-#++ sudo -u ec2-user aws ec2 describe-volume-status --volume-ids vol-04745aa0f6993c3e8
-#+ '[' ok = ok ']'
-#+ mkdir -p /local/apps/redpanda
-#++ file -s /dev/xvdb
-#+ '[' '/dev/xvdb: cannot open (No such file or directory)' = '/dev/xvdb: data' ']'
-#+ mount /dev/xvdb /local/apps/redpanda
-#mount: /local/apps/redpanda: special device /dev/xvdb does not exist.
 
 # determine if volume contents is empty or populated
 if [ "`file -s /dev/xvdb`" = "/dev/xvdb: data" ]; then
@@ -96,18 +91,17 @@ yum install -y redpanda
 find /etc/redpanda/ /var/lib/redpanda/ $MOUNT_DIR/ -name '*' | xargs -d '\n' chown redpanda:redpanda
 
 # configure redpanda
-EXTERNAL_IP=`curl -s http://169.254.169.254/latest/meta-data/public-ipv4`
+INTERNAL_IP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4`
 if [ $NODE_ID -eq 0 ] && [ $NEW -eq 1 ]; then
-  sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $EXTERNAL_IP
+  sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP
 else
   # TODO use load balancer IP for ips flag
-  sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $EXTERNAL_IP --ips $BROKERS
+  sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP --ips $BROKERS
 fi
 sudo -u redpanda rpk redpanda config set cluster_id $CLUSTER_ID
 sudo -u redpanda rpk redpanda config set organization $ORGANIZATION
 sudo -u redpanda rpk redpanda config set redpanda.advertised_kafka_api "[{address: $HOSTNAME.$DOMAIN, port: 9092}]"
-# TODO vectorized internal rpc protocol - Error attempting to listen on {://3.130.163.61:33145:PLAINTEXT}... failed for address 3.130.163.61:33145: Cannot assign requested address
-#sudo -u redpanda rpk redpanda config set redpanda.advertised_rpc_api "{address: $HOSTNAME.$DOMAIN, port: 33145}"
+sudo -u redpanda rpk redpanda config set redpanda.advertised_rpc_api "{address: $HOSTNAME.$DOMAIN, port: 33145}"
 
 # restart redpanda
 systemctl restart redpanda
@@ -115,5 +109,5 @@ systemctl restart redpanda
 # if leader, set seed_servers
 if [ $NODE_ID -eq 0 ]; then
   # TODO use load balancer IP for ips flag
-  sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $EXTERNAL_IP --ips $BROKERS
+  sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP --ips $BROKERS
 fi
