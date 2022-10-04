@@ -22,18 +22,25 @@ aws configure set region $REGION
 aws ec2 associate-address --instance-id "$INSTANCE_ID" --public-ip ${EIP}
 
 cat <<EOF > index.js
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import Fastify from 'fastify'
+import fetch from 'node-fetch'
 import {
+  DescribeAddressesCommand,
   DescribeInstanceStatusCommand,
+  DescribeVolumesCommand,
   EC2Client,
   TerminateInstancesCommand,
 } from '@aws-sdk/client-ec2'
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { Upload } from '@aws-sdk/lib-storage'
-import Fastify from 'fastify'
-import fetch from 'node-fetch'
+
+const sleep = (ms) => {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
 
 const HEALTH_CHECK_FREQUENCY_MS = 10 * 1000
 const HEALTH_CHECK_FAILURE_LIMIT = 3
+const REQUEST_TIMEOUT_MS = 2 * 1000
 
 const region = '$REGION'
 const Bucket = '${BUCKET}'
@@ -41,6 +48,7 @@ const Bucket = '${BUCKET}'
 const fastify = Fastify({ logger: true })
 const s3Client = new S3Client({ region })
 const ec2Client = new EC2Client({ region })
+const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
 
 // get general cluster info
 const clusterId = await getState('cluster_id')
@@ -58,133 +66,211 @@ const generalInfo = {
 
 // get hostname info
 const hostnames = hostnamesStr.split(' ')
-const nodeDetails = new Map()
-for(let i = 0; i < hostnames.length; i++) {
-  const hostname = hostnames[i]
-  let hostnameInfo = await getState(hostname + '_info')
-  const { volume_id: volumeId, eip } = JSON.parse(hostnameInfo)
-  nodeDetails.set(hostname, {
-    hostname,
-    volumeId,
-    eip,
-    url: 'http://' + hostname + '.' + domain + ':9644/public_metrics',
+async function getNodeDetails() {
+  const map = new Map()
+  for (let i = 0; i < hostnames.length; i++) {
+    const hostname = hostnames[i]
+    let hostnameInfo = null
+    try {
+      hostnameInfo = await getState(hostname + '_info')
+    } catch (err) {
+      console.error(err)
+    }
+    const { volume_id: volumeId, eip } = JSON.parse(hostnameInfo)
+    map.set(hostname, {
+      nodeId: i,
+      hostname,
+      volumeId,
+      eip,
+      adminUrl: 'http://' + hostname + '.' + domain + ':9644',
+      instanceId: '',
+      failCount: 0,
+      isPrimary: false,
+      isVolumeReady: false,
+      hasCompletedStartup: false,
+      brokers: [],
+    })
+  }
+  return map
+}
+const nodeDetails = await getNodeDetails()
+
+//set instanceID based off elastic IP association
+async function linkInstances() {
+  console.log('linking instances based off elastic IP association')
+  let PublicIps = []
+  for (let i = 0; i < hostnames.length; i++) {
+    const details = nodeDetails.get(hostnames[i])
+    PublicIps.push(details.eip)
+  }
+  const params = { PublicIps }
+  let result = null
+  try {
+    result = await ec2Client.send(new DescribeAddressesCommand(params))
+  } catch (err) {
+    console.error('linkInstances error', err)
+  }
+  result.Addresses.forEach((addressObj) => {
+    const { InstanceId, PublicIp } = addressObj
+    if(!InstanceId) return
+    // set nodeDetails.instanceId
+    for (let i = 0; i < hostnames.length; i++) {
+      const details = nodeDetails.get(hostnames[i])
+      if (details.eip === PublicIp) {
+        nodeDetails.set(hostnames[i], {
+          ...details,
+          ...{ instanceId: InstanceId },
+        })
+      }
+    }
   })
 }
+await linkInstances()
 
-const didInstanceAlreadyFail = new Map()
-nodeDetails.forEach(({ hostname }) => didInstanceAlreadyFail.set(hostname, 0))
-
-/*
- * redpanda instances call this endpoint early in their user_data script
- * after system updates
- * before DNS update, volume mount, redpanda install/start
- * in: instanceId, out: { hostname, volumeId, eip }
- */
-fastify.get('/node-info', async (request, reply) => {
-  // get instance id from request
-  const instanceId = request.query.instance_id
-  const unmatchedHostnames = []
-  for(let i = 0; i < hostnames.length; i++) {
-    const hostname = hostnames[i]
-    // get matching instance ids
-    const matchedInstanceId = await getState(hostname + '_to_instance_id')
-    if(typeof matchedInstanceId === 'object') {
-      reply.code(500)
-      return matchedInstanceId
-    }
-    // compare instanceId to matchedInstanceId
-    if(instanceId === matchedInstanceId) {
-      //reply.code(400)
-      //return new Error('Instance ID ' + instanceId + ' already matches hostname ' + hostname)
-      reply
-        .code(200)
-        .header('Content-Type', 'application/json; charset=utf-8')
-      return nodeDetails.get(hostname)
-    }
-    if(matchedInstanceId.length === 0) {
-      unmatchedHostnames.push(hostname)
+// determine primary node
+async function determinePrimaryNode() {
+  let primaryNodeId = null
+  for (let i = 0; i < hostnames.length && !primaryNodeId; i++) {
+    const url = nodeDetails.get(hostnames[i]).adminUrl + '/v1/cluster/health_overview'
+    try {
+      const result = await fetch(url, { signal })
+      primaryNodeId = result.controller_id
+    } catch (err) {
     }
   }
-  if(unmatchedHostnames.length === 0) {
-    reply.code(400)
-    return new Error('All EBS volumes are assigned to hosts')
+  if (!primaryNodeId) {
+    primaryNodeId = nodeDetails.get(hostnames[0]).nodeId
   }
-  // find first hostname without instance id
-  const hostname = unmatchedHostnames[0]
-  //set value to instance id from request
-  const instanceIdResult = await setState(hostname + '_to_instance_id', instanceId)
-  if(typeof instanceIdResult === 'object') {
-    reply.code(500)
-    return instanceIdResult
-  }
-  reply
-    .code(200)
-    .header('Content-Type', 'application/json; charset=utf-8')
-  return nodeDetails.get(hostname)
-})
-
-/*
- * health check calls this for an instance that fails health check
- */
-async function deleteInstanceLink(instanceId) {
-  let unsetHostname = null
-  // get hostnames
-  const hostnamesStr = await getState('hostnames')
-  if(typeof hostnamesStr === 'object') {
-    return {
-      code: 500,
-      response: hostnamesStr,
+  let primaryNodeChanged = false
+  for (let i = 0; i < hostnames.length; i++) {
+    let details = nodeDetails.get(hostnames[i])
+    if (details.nodeId === primaryNodeId && !details.isPrimary) {
+      nodeDetails.set(hostnames[i], {
+        ...details,
+        ...{ isPrimary: true },
+      })
+      primaryNodeChanged = true
+    }
+    if (details.nodeId !== primaryNodeId && details.isPrimary) {
+      nodeDetails.set(hostnames[i], {
+        ...details,
+        ...{ isPrimary: false },
+      })
+      primaryNodeChanged = true
     }
   }
-  const hostnames = hostnamesStr.split(' ')
-  for(let i = 0; i < hostnames.length; i++) {
-    const hostname = hostnames[i]
-    // get matched instance ids
-    const matchedInstanceId = await getState(hostname + '_to_instance_id')
-    if(typeof matchedInstanceId === 'object') {
-      return {
-        code: 500,
-        response: matchedInstanceId,
-      }
-    }
-    if(instanceId === matchedInstanceId) {
-      const unsetResult = await setState(hostname + '_to_instance_id', '')
-      if(typeof unsetResult === 'object') {
-        return {
-          code: 500,
-          response: unsetResult,
-        }
-      }
-      unsetHostname = hostname
-    }
-  }
-  if(!unsetHostname) {
-    return {
-      code: 500,
-      response: 'Instance ID ' + instanceId + ' not associated with any hostname',
-    }
-  }
-  return {
-    code: 200,
-    response: 'Disconnected instance ID ' + instanceId + ' from hostname ' + unsetHostname,
+  if(primaryNodeChanged) {
+    console.log('primary node updated')
   }
 }
+await determinePrimaryNode()
 
-fastify.delete('/instance-id', async (request, reply) => {
-  // get instance id from request
+function getSeedServers() {
+  let result = []
+  nodeDetails.forEach((details, hostname) => {
+    const { failCount, hasCompletedStartup } = details
+    if(failCount === 0 && hasCompletedStartup) result.push(hostname + '.' + domain)
+  })
+  console.log('seed servers', result.toString())
+  return result
+}
+
+//assign instance to node, return node details
+async function registerInstance(instanceId) {
+  let result = null
+  let seedServers = getSeedServers()
+
+  let notMatched = true
+  nodeDetails.forEach((details, key) => {
+    const otherBrokers = seedServers
+      .filter(seedServer => seedServer.split('.')[0] !== key)
+    console.log(key, otherBrokers)
+    if(otherBrokers.length === 0 && !details.isPrimary) {
+      // no seed servers available after removing self
+      // if not primary node, make node wait
+      return result
+    }
+    if(details.instanceId.length === 0 && notMatched) {
+      const newDetails = {
+        ...details,
+        ...{
+          instanceId,
+          brokers: brokers.toString(),
+        },
+      }
+      nodeDetails.set(details.hostname, newDetails)
+      result = newDetails
+      notMatched = false
+    }
+  })
+  return result
+}
+
+let handlingRegistration = ''
+
+fastify.get('/register', async (request, reply) => {
   const instanceId = request.query.instance_id
-  const result = await deleteInstanceLink(instanceId)
-  reply.code(result.code)
-  if(result.code === 200) {
-    reply.header('Content-Type', 'application/text; charset=utf-8')
+  if(handlingRegistration.length === 0) {
+    handlingRegistration = instanceId
+    if(handlingRegistration !== instanceId) {
+      reply.code(503).header('Content-Type', 'application/text; charset=utf-8')
+      return 'already handling registration'
+    }
+    // get instance id from request
+    const result = await registerInstance(instanceId)
+    if(!result) {
+      reply.code(503).header('Content-Type', 'application/text; charset=utf-8')
+      return 'no seed servers available'
+    }
+    handlingRegistration = ''
+    reply.code(200).header('Content-Type', 'application/json; charset=utf-8')
+    return result
   }
-  return result.response
+  reply.code(503).header('Content-Type', 'application/text; charset=utf-8')
+  return 'already handling registration'
 })
 
 fastify.get('/general-info', async (_, reply) => {
-  reply
-    .code(200)
-    .header('Content-Type', 'application/json; charset=utf-8')
+  reply.code(200).header('Content-Type', 'application/json; charset=utf-8')
+  return generalInfo
+})
+
+// nodes call after volume is ready and are waiting to start
+fastify.get('/can-start', async (request, reply) => {
+  let result = 0
+  const instanceId = request.query.instance_id
+  let primaryNotFound = true
+  let primaryDetails = null
+
+  nodeDetails.forEach((details, key) => {
+    if(details.isPrimary) primaryDetails = details
+    if(instanceId === details.instanceId && !details.isVolumeReady) {
+      const newDetails = {
+        ...details,
+        ...{ isVolumeReady: true },
+      }
+      nodeDetails.set(key, newDetails)
+    }
+  })
+  if(instanceId === primaryDetails.instanceId || primaryDetails.hasCompletedStartup) {
+    result = 1
+  }
+  return result
+})
+
+fastify.get('/completed-startup', async (request, reply) => {
+  const instanceId = request.query.instance_id
+  for (let i = 0; i < hostnames.length; i++) {
+    const details = nodeDetails.get(hostnames[i])
+    const { instanceId: linkedInstance } = details
+    if (linkedInstance === instanceId) {
+      nodeDetails.set(hostnames[i], {
+        ...details,
+        ...{ hasCompletedStartup: true },
+      })
+    }
+  }
+  reply.code(200).header('Content-Type', 'application/json; charset=utf-8')
   return generalInfo
 })
 
@@ -225,64 +311,7 @@ async function setState(Key, Body) {
   return 'success'
 }
 
-async function handleStatus(hostname, endpoint) {
-  const instanceId = await getState(hostname + '_to_instance_id')
-  if(typeof instanceId === 'object') {
-    console.error(instanceId)
-    return
-  }
-  if(instanceId.length === 0) {
-    console.log(hostname + ' is not connected to an instance')
-    return
-  }
-
-  // get system status
-  const params = { InstanceIds: [instanceId] }
-  try {
-    const instanceStatusResult = await ec2Client.send(new DescribeInstanceStatusCommand(params))
-    const instanceStatus = instanceStatusResult.InstanceStatuses[0]?.InstanceStatus?.Status
-    // don't delete instance if initializing
-    if (instanceStatus === 'initializing') return
-    if (instanceStatus !== 'ok') {
-      console.log(hostname + ':' + instanceId + ' failed system health check, delinking')
-      deleteInstanceLink(instanceId)
-      return
-    }
-  } catch (err) {
-    if(err.Code === 'InvalidInstanceID.NotFound') {
-      console.log(hostname + ':' + instanceId + ' doesn\'t exist, delinking')
-      deleteInstanceLink(instanceId)
-      return
-    }
-    console.error(err)
-    process.exit(1)
-  }
-
-  // get app status
-  try {
-  const { status } = await fetch(endpoint)
-  } catch(err) {
-    //console.error(hostname + ' ' + err.name)
-    const failCount = didInstanceAlreadyFail.get(hostname)
-    if (failCount > HEALTH_CHECK_FAILURE_LIMIT) {
-      console.log(hostname + ':' + instanceId + ' failed too many application health checks, delinking and terminating instance')
-      //await ec2Client.send(new TerminateInstancesCommand(params))
-      //deleteInstanceLink(instanceId)
-      //didInstanceAlreadyFail.set(hostname, 0)
-      return
-    } else {
-      console.log(hostname + ':' + instanceId + ' failed application health check, increasing fail count')
-      //didInstanceAlreadyFail.set(hostname, failCount + 1)
-      return
-    }
-  }
-  console.log(hostname + ':' + instanceId + ' passed health check')
-}
-
-const sleep = (ms) => {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
+// start server
 try {
   await fastify.listen({ host: '0.0.0.0', port: 3000 })
 } catch (err) {
@@ -290,8 +319,177 @@ try {
   process.exit(1)
 }
 
+/*
+ * available:
+ * - /public_metrics
+ * - TODO kafka API
+ */
+async function isNodeAvailable(nodeDetails) {
+  const { adminUrl, hostname } = nodeDetails
+  try {
+    const response = await fetch(adminUrl + '/public_metrics', { signal })
+    return true
+  } catch (err) {
+    //console.error(hostname + ' ' + err.name)
+    return false
+  }
+}
+
+/*
+ * return true if node is healthy, false otherwise
+ * healthy means the node can become available
+ * healthy:
+ * - EBS volume status
+ * - attached to EBS volume
+ * - network
+ * - instance
+ * when is a node unhealthy?
+ * - instance is unavailable and not starting or started recently
+ * - instance is started but not attached to volume
+ */
+async function isNodeHealthy(nodeDetails) {
+  const {
+    nodeId,
+    hostname,
+    volumeId,
+    eip,
+    adminUrl,
+    instanceId,
+    failCount,
+    isPrimary,
+    isVolumeReady,
+    hasCompletedStartup,
+  } = nodeDetails
+
+  if (instanceId.length === 0) {
+    return true
+  }
+
+  // get instance status
+  const instanceStatusParams = { InstanceIds: [instanceId] }
+  // can be: impaired, initializing, insufficient_data, not_applicable, ok
+  let instanceStatus = null
+  try {
+    const instanceStatusResult = await ec2Client.send(
+      new DescribeInstanceStatusCommand(instanceStatusParams)
+    )
+    instanceStatus = instanceStatusResult.InstanceStatuses[0]?.InstanceStatus?.Status
+    if (!instanceStatus) {
+      console.log(instanceId + ' in unknown state')
+      return true
+    }
+  } catch (err) {
+    if (err.Code === 'InvalidInstanceID.NotFound') {
+      console.log(instanceId + ' not found')
+      return false
+    }
+  }
+
+  // instance is unavailable and either 1) not starting or 2) started recently
+  if (instanceStatus === 'initializing' || instanceStatus === 'ok') return true
+
+  // get volume status
+  let volumeStatus = null
+  try {
+    const volumeStatusResult = await ec2Client.send(
+      new DescribeVolumesCommand({ VolumeIds: [volumeId] })
+    )
+    // can be: available, creating, deleted, deleting, error, in_use
+    volumeStatus = volumeStatusResult.Volumes[0]?.State
+  } catch (err) {
+    console.error('volume ' + volumeId + ' error', err)
+    return true
+  }
+  if (volumeStatus === 'available') {
+    console.log('instance ' + instanceId + ' and volume ' + volumeId + ' are not yet attached')
+    return false
+  }
+  if (volumeStatus === 'creating') {
+    console.log('volume ' + volumeId + ' is still creating')
+    return true
+  }
+  if (!volumeStatus.includes('-')) {
+    console.log('volume ' + volumeId + ' ' + volumeStatus)
+    return true
+  }
+}
+
+async function unlinkAndTerminateInstance(instanceId) {
+  // terminate
+  const terminateParams = { InstanceIds: [instanceId] }
+  try {
+    await ec2Client.send(new TerminateInstancesCommand(terminateParams))
+    console.log('requested termination of instance ' + instanceId)
+  } catch (err) {
+    console.error(err)
+  }
+  // unlink
+  for (let i = 0; i < hostnames.length; i++) {
+    const details = nodeDetails.get(hostnames[i])
+    const { hostname, eip, instanceId: linkedInstance } = detail
+    if (linkedInstance === instanceId) {
+      nodeDetails.set(hostnames[i], {
+        ...details,
+        ...{
+          instanceId: '',
+          failCount: 0,
+          isPrimary: false,
+          hasCompletedStartup: false,
+        },
+      })
+    }
+  }
+}
+
+/*
+ * loop continuously checking node availability and then health
+ * availability: whether node responds to admin API requests
+ * healthy: status of volume, instance, network
+ * if node is available then health check is skipped
+ * multiple failed health checks in a row result in instance being terminated
+ * causing the ASG to start another instance
+ * when to unlink and terminate an instance?
+ * - when failure count limit is exceeded
+ * what increases failure count?
+ * - instance is unavailable and not starting or started recently
+ * - instance is started but not attached to volume
+ */
 while (true) {
-  nodeDetails.forEach(({ hostname, url }) => handleStatus(hostname, url))
+  for (let i = 0; i < hostnames.length; i++) {
+    const details = nodeDetails.get(hostnames[i])
+    const { failCount, hostname, instanceId, adminUrl } = details
+    const isAvailable = await isNodeAvailable(hostname, adminUrl)
+    if (isAvailable) {
+      console.log(hostname + ' is available')
+      continue
+    }
+    const isHealthy = await isNodeHealthy(details)
+    if (isHealthy) {
+      console.log(hostname + ' is not available but is healthy')
+      continue
+    }
+    if (failCount > HEALTH_CHECK_FAILURE_LIMIT) {
+      console.log(
+        hostname +
+          ':' +
+          instanceId +
+          ' failed too many application health checks, delinking and terminating instance'
+      )
+      unlinkAndTerminateInstance(instanceId)
+    } else {
+      console.log(
+        hostname + ':' + instanceId + ' failed application health check, increasing fail count'
+      )
+      const newDetails = {
+        ...details,
+        ...{ failCount: failCount + 1 },
+      }
+      console.log(newDetails)
+      nodeDetails.set(hostname[i], newDetails)
+    }
+  }
+  getSeedServers()
+  await determinePrimaryNode()
   await sleep(HEALTH_CHECK_FREQUENCY_MS)
   console.log('---')
 }

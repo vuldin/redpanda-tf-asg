@@ -37,6 +37,13 @@ resource "aws_security_group" "redpanda" {
      cidr_blocks = ["0.0.0.0/0"]
    }
 
+  ingress {
+     from_port   = 33145
+     to_port     = 33145
+     protocol    = "tcp"
+     cidr_blocks = ["0.0.0.0/0"]
+   }
+
   egress {
      from_port   = 0
      to_port     = 0
@@ -114,9 +121,6 @@ resource "aws_autoscaling_group" "redpanda" {
   desired_capacity          = length(local.hostnames)
   min_size                  = length(local.hostnames)
   max_size                  = length(local.hostnames)
-  #desired_capacity          = 1
-  #min_size                  = 1
-  #max_size                  = 1
   health_check_grace_period = 30
   health_check_type         = "EC2"
   force_delete              = true

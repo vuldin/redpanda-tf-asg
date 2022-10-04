@@ -43,7 +43,10 @@ resource "aws_iam_policy" "bootstrap" {
         "Effect": "Allow",
         "Action": [
           "ec2:AssociateAddress",
-          "ec2:DescribeInstanceStatus"
+          "ec2:DescribeAddresses",
+          "ec2:DescribeInstanceStatus",
+          "ec2:DescribeVolumes",
+          "ec2:TerminateInstances",
         ],
         "Resource": [
           "*",

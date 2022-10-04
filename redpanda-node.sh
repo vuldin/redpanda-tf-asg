@@ -12,10 +12,9 @@ BOOTSTRAP_URL=${BOOTSTRAP_URL}
 INSTANCE_ID=`curl -s http://169.254.169.254/latest/meta-data/instance-id`
 REGION=`curl -s http://169.254.169.254/latest/meta-data/placement/region`
 
-GENERAL_INFO='{"statusCode":404}'
-while [ `echo $GENERAL_INFO | jq -r '.statusCode'` = 404 ]; do
+until GENERAL_INFO=`curl -sf "$BOOTSTRAP_URL/general-info"`; do
   sleep 10
-  GENERAL_INFO=`curl -s $BOOTSTRAP_URL/general-info`
+  echo "looping on GENERAL_INFO"
 done
 CLUSTER_ID=`echo $GENERAL_INFO | jq -r '.clusterId'`
 DOMAIN=`echo $GENERAL_INFO | jq -r '.domain'`
@@ -23,15 +22,15 @@ HOSTNAMES=`echo $GENERAL_INFO | jq -r '.hostnames'`
 ORGANIZATION=`echo $GENERAL_INFO | jq -r '.organization'`
 MOUNT_DIR=`echo $GENERAL_INFO | jq -r '.mountDir'`
 
-# TODO this loop could be improved to not always sleep the initial run
-INSTANCE_INFO='{"statusCode":404}'
-while [ `echo $INSTANCE_INFO | jq -r '.statusCode'` = 404 ]; do
+until INSTANCE_INFO=`curl -sf "$BOOTSTRAP_URL/register?instance_id=$INSTANCE_ID"`; do
   sleep 10
-  INSTANCE_INFO=`curl -s "$BOOTSTRAP_URL/node-info?instance_id=$INSTANCE_ID"`
+  echo "looping on INSTANCE_INFO"
 done
 VOLUME_ID=`echo $INSTANCE_INFO | jq -r '.volumeId'`
 HOSTNAME=`echo $INSTANCE_INFO | jq -r '.hostname'`
 EIP=`echo $INSTANCE_INFO | jq -r '.eip'`
+NODE_ID=`echo $INSTANCE_INFO | jq -r '.nodeId'`
+BROKERS=`echo $INSTANCE_INFO | jq -r '.brokers'`
 
 sudo -u ec2-user aws configure set region $REGION
 
@@ -49,18 +48,19 @@ sudo -u ec2-user aws ec2 create-tags --resources "$INSTANCE_ID" --tags "Key=Name
 # this may be done automatically due to elastic IP and/or route53
 
 # TODO replace broker list with load balancer URL
-for HOST in $HOSTNAMES; do
-  BROKERS="$BROKERS$HOST.$DOMAIN,"
-done
-BROKERS=`echo $${BROKERS::-1}`
+#for HOST in $HOSTNAMES; do
+#  BROKERS="$BROKERS$HOST.$DOMAIN,"
+#done
+#BROKERS=`echo $${BROKERS::-1}`
 
 # attach EBS volume
 sudo -u ec2-user aws ec2 attach-volume --volume-id $VOLUME_ID --instance-id $INSTANCE_ID --device /dev/xvdb
 # wait until volume status is ok
-until [ `sudo -u ec2-user aws ec2 describe-volume-status --volume-ids $VOLUME_ID | jq -r '.VolumeStatuses[].VolumeStatus.Status'` = ok ]; do
-  sleep 10
+#until [ `sudo -u ec2-user aws ec2 describe-volume-status --volume-ids $VOLUME_ID | jq -r '.VolumeStatuses[].VolumeStatus.Status'` = ok ]; do
+until $(lsblk | grep -q xvdb); do
+  sleep 5
 done
-sleep 5 # TODO volume still not mountable immediately after ok status
+
 # create mount directory
 mkdir -p $MOUNT_DIR
 
@@ -70,12 +70,10 @@ if [ "`file -s /dev/xvdb`" = "/dev/xvdb: data" ]; then
   mkfs.xfs /dev/xvdb
   mount /dev/xvdb $MOUNT_DIR
   mkdir $MOUNT_DIR/{config,data}
-  NODE_ID=`curl -s http://169.254.169.254/latest/meta-data/ami-launch-index`
   NEW=1
 else
   # populated
   mount /dev/xvdb $MOUNT_DIR
-  NODE_ID=`cat $MOUNT_DIR/config/redpanda.yaml | yq '.redpanda.node_id'`
   NEW=0
 fi
 
@@ -90,6 +88,12 @@ yum install -y redpanda
 # ensure redpanda user is owner of all related files/directories
 find /etc/redpanda/ /var/lib/redpanda/ $MOUNT_DIR/ -name '*' | xargs -d '\n' chown redpanda:redpanda
 
+CAN_START='0'
+while [ `echo $CAN_START` = '0' ] || [ -z $CAN_START ]; do
+  sleep 10
+  CAN_START=`curl -s "$BOOTSTRAP_URL/can-start?instance_id=$INSTANCE_ID"`
+done
+
 # configure redpanda
 INTERNAL_IP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4`
 if [ $NODE_ID -eq 0 ] && [ $NEW -eq 1 ]; then
@@ -103,11 +107,14 @@ sudo -u redpanda rpk redpanda config set organization $ORGANIZATION
 sudo -u redpanda rpk redpanda config set redpanda.advertised_kafka_api "[{address: $HOSTNAME.$DOMAIN, port: 9092}]"
 sudo -u redpanda rpk redpanda config set redpanda.advertised_rpc_api "{address: $HOSTNAME.$DOMAIN, port: 33145}"
 
-# restart redpanda
-systemctl restart redpanda
+# start redpanda
+systemctl start redpanda
 
 # if leader, set seed_servers
-if [ $NODE_ID -eq 0 ]; then
+#if [ $NODE_ID -eq 0 ]; then
+  # TODO wait until load balancer and at least one other node is available
   # TODO use load balancer IP for ips flag
-  sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP --ips $BROKERS
-fi
+  #sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP --ips $BROKERS
+#fi
+
+curl -s "$BOOTSTRAP_URL/completed-startup?instance_id=$INSTANCE_ID"
