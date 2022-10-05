@@ -350,7 +350,7 @@ async function unlinkAndTerminateInstance(instanceId) {
   // unlink
   for (let i = 0; i < hostnames.length; i++) {
     const details = nodeDetails.get(hostnames[i])
-    const { hostname, instanceId: linkedInstance } = detail
+    const { hostname, instanceId: linkedInstance } = details
     if (linkedInstance === instanceId) {
       nodeDetails.set(hostname, {
         ...details,
