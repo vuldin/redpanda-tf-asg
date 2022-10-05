@@ -57,7 +57,7 @@ Once you are ready, run the following command to create/update the infrastructur
 terraform apply
 ```
 
-The above command takes around 1 minutes to complete, and DNS names should resolve in ~30 seconds.
+Given the default values, the above command spins up a 3-node cluster with nodes making use of EBS volumes, Elastic IPs, and DNS via Route53. It takes roughly 3 minutes to get to a fully functional cluster.
 
 ## Clean up
 
