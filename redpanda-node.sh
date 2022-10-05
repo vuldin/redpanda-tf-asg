@@ -44,19 +44,13 @@ done
 # set instance name
 sudo -u ec2-user aws ec2 create-tags --resources "$INSTANCE_ID" --tags "Key=Name,Value=$CLUSTER_ID-$HOSTNAME"
 
-# TODO register with load balancer
-# this may be done automatically due to elastic IP and/or route53
-
-# TODO replace broker list with load balancer URL
-#for HOST in $HOSTNAMES; do
-#  SEED_SERVERS="$SEED_SERVERS$HOST.$DOMAIN,"
-#done
-#SEED_SERVERS=`echo $${SEED_SERVERS::-1}`
-
+# ensure volume is available
+until `sudo -u ec2-user aws ec2 describe-volume-status --volume-ids $VOLUME_ID | jq -r '.VolumeStatuses[].VolumeStatus.Status' | grep -q ok`; do
+  sleep 5
+done
 # attach EBS volume
 sudo -u ec2-user aws ec2 attach-volume --volume-id $VOLUME_ID --instance-id $INSTANCE_ID --device /dev/xvdb
 # wait until volume status is ok
-#until [ `sudo -u ec2-user aws ec2 describe-volume-status --volume-ids $VOLUME_ID | jq -r '.VolumeStatuses[].VolumeStatus.Status'` = ok ]; do
 until $(lsblk | grep -q xvdb); do
   sleep 5
 done
@@ -87,12 +81,6 @@ yum install -y redpanda
 
 # ensure redpanda user is owner of all related files/directories
 find /etc/redpanda/ /var/lib/redpanda/ $MOUNT_DIR/ -name '*' | xargs -d '\n' chown redpanda:redpanda
-
-#CAN_START='0'
-#while [ `echo $CAN_START` = '0' ] || [ -z $CAN_START ]; do
-#  sleep 10
-#  CAN_START=`curl -s "$BOOTSTRAP_URL/can-start?instance_id=$INSTANCE_ID"`
-#done
 
 # configure redpanda
 INTERNAL_IP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4`
