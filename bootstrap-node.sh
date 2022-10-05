@@ -193,7 +193,7 @@ async function updateSeedServers() {
       ...{ seedServers: otherSeedServers.toString() },
     }
     nodeDetails.set(hostname, newDetails)
-    console.log(hostname, 'seed servers', otherSeedServers.toString())
+    //console.log(hostname, 'seed servers', otherSeedServers.toString())
   })
 }
 
@@ -370,7 +370,7 @@ while (true) {
   await determinePrimaryNode()
   for (let i = 0; i < hostnames.length; i++) {
     const details = nodeDetails.get(hostnames[i])
-    const { failCount, hostname, instanceId, adminUrl } = details
+    const { failCount: previousFailCount, hostname, instanceId, adminUrl } = details
     const isAvailable = await isNodeAvailable(details)
     if (isAvailable) {
       console.log(hostname + ' is available')
@@ -385,7 +385,11 @@ while (true) {
     console.log(
       hostname + ':' + instanceId + ' failed application health check, increasing fail count'
     )
-    failCount += 1
+    const failCount = previousFailCount + 1
+    nodeDetails.set(hostname, {
+      ...details,
+      ...{ failCount },
+    })
     if (failCount > HEALTH_CHECK_FAILURE_LIMIT) {
       console.log(
         hostname +
