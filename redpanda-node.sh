@@ -30,7 +30,7 @@ VOLUME_ID=`echo $INSTANCE_INFO | jq -r '.volumeId'`
 HOSTNAME=`echo $INSTANCE_INFO | jq -r '.hostname'`
 EIP=`echo $INSTANCE_INFO | jq -r '.eip'`
 NODE_ID=`echo $INSTANCE_INFO | jq -r '.nodeId'`
-BROKERS=`echo $INSTANCE_INFO | jq -r '.brokers'`
+SEED_SERVERS=`echo $INSTANCE_INFO | jq -r '.seedServers'`
 
 sudo -u ec2-user aws configure set region $REGION
 
@@ -49,9 +49,9 @@ sudo -u ec2-user aws ec2 create-tags --resources "$INSTANCE_ID" --tags "Key=Name
 
 # TODO replace broker list with load balancer URL
 #for HOST in $HOSTNAMES; do
-#  BROKERS="$BROKERS$HOST.$DOMAIN,"
+#  SEED_SERVERS="$SEED_SERVERS$HOST.$DOMAIN,"
 #done
-#BROKERS=`echo $${BROKERS::-1}`
+#SEED_SERVERS=`echo $${SEED_SERVERS::-1}`
 
 # attach EBS volume
 sudo -u ec2-user aws ec2 attach-volume --volume-id $VOLUME_ID --instance-id $INSTANCE_ID --device /dev/xvdb
@@ -88,11 +88,11 @@ yum install -y redpanda
 # ensure redpanda user is owner of all related files/directories
 find /etc/redpanda/ /var/lib/redpanda/ $MOUNT_DIR/ -name '*' | xargs -d '\n' chown redpanda:redpanda
 
-CAN_START='0'
-while [ `echo $CAN_START` = '0' ] || [ -z $CAN_START ]; do
-  sleep 10
-  CAN_START=`curl -s "$BOOTSTRAP_URL/can-start?instance_id=$INSTANCE_ID"`
-done
+#CAN_START='0'
+#while [ `echo $CAN_START` = '0' ] || [ -z $CAN_START ]; do
+#  sleep 10
+#  CAN_START=`curl -s "$BOOTSTRAP_URL/can-start?instance_id=$INSTANCE_ID"`
+#done
 
 # configure redpanda
 INTERNAL_IP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4`
@@ -100,7 +100,7 @@ if [ $NODE_ID -eq 0 ] && [ $NEW -eq 1 ]; then
   sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP
 else
   # TODO use load balancer IP for ips flag
-  sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP --ips $BROKERS
+  sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP --ips $SEED_SERVERS
 fi
 sudo -u redpanda rpk redpanda config set cluster_id $CLUSTER_ID
 sudo -u redpanda rpk redpanda config set organization $ORGANIZATION
@@ -114,7 +114,7 @@ systemctl start redpanda
 #if [ $NODE_ID -eq 0 ]; then
   # TODO wait until load balancer and at least one other node is available
   # TODO use load balancer IP for ips flag
-  #sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP --ips $BROKERS
+  #sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP --ips $SEED_SERVERS
 #fi
 
 curl -s "$BOOTSTRAP_URL/completed-startup?instance_id=$INSTANCE_ID"

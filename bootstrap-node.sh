@@ -15,7 +15,7 @@ curl https://get.volta.sh | sudo -u ec2-user bash
 /home/ec2-user/.volta/bin/volta install node@${NODEJS_VERSION}
 mkdir bootstrap-node && cd bootstrap-node
 /home/ec2-user/.volta/bin/npm init -y es6
-/home/ec2-user/.volta/bin/npm i @aws-sdk/client-ec2 @aws-sdk/client-s3 @aws-sdk/lib-storage fastify node-fetch
+/home/ec2-user/.volta/bin/npm i @aws-sdk/client-ec2 @aws-sdk/client-s3 @aws-sdk/lib-storage fastify node-libcurl
 
 # update DNS
 aws configure set region $REGION
@@ -23,16 +23,14 @@ aws ec2 associate-address --instance-id "$INSTANCE_ID" --public-ip ${EIP}
 
 cat <<EOF > index.js
 import Fastify from 'fastify'
-import fetch from 'node-fetch'
+import { curly } from 'node-libcurl'
 import {
   DescribeAddressesCommand,
   DescribeInstanceStatusCommand,
-  DescribeVolumesCommand,
   EC2Client,
   TerminateInstancesCommand,
 } from '@aws-sdk/client-ec2'
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3'
-import { Upload } from '@aws-sdk/lib-storage'
 
 const sleep = (ms) => {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -86,9 +84,9 @@ async function getNodeDetails() {
       instanceId: '',
       failCount: 0,
       isPrimary: false,
-      isVolumeReady: false,
+      //isVolumeReady: false,
       hasCompletedStartup: false,
-      brokers: [],
+      seedServers: [],
     })
   }
   return map
@@ -133,8 +131,10 @@ async function determinePrimaryNode() {
   for (let i = 0; i < hostnames.length && !primaryNodeId; i++) {
     const url = nodeDetails.get(hostnames[i]).adminUrl + '/v1/cluster/health_overview'
     try {
-      const result = await fetch(url, { signal })
-      primaryNodeId = result.controller_id
+      const { data } = await curly.get(url, {
+        TIMEOUT_MS: REQUEST_TIMEOUT_MS,
+      })
+      primaryNodeId = data.controller_id
     } catch (err) {
     }
   }
@@ -165,97 +165,89 @@ async function determinePrimaryNode() {
 }
 await determinePrimaryNode()
 
-function getSeedServers() {
-  let result = []
+async function updateSeedServers() {
+
+  const allSeedServers = []
+  // get all node DNS names
+  //nodeDetails.forEach((details, hostname) => {
+    //const { hasCompletedStartup } = details
+    // TODO setting seed servers based on hasCompletedStartup
+    // only works if bootstrap service is running before all nodes
+    //if(hasCompletedStartup) allSeedServers.push(hostname + '.' + domain)
+    //allSeedServers.push(hostname + '.' + domain)
+  //})
+
+  // verify seed servers
+  const values = [...nodeDetails.values()]
+  for(let i = 0; i < values.length; i++) {
+    const result = await isNodeAvailable(values[i])
+    if(result) allSeedServers.push(values[i].hostname + '.' + domain)
+  }
+
+  // update seed servers for all nodes
   nodeDetails.forEach((details, hostname) => {
-    const { failCount, hasCompletedStartup } = details
-    if(failCount === 0 && hasCompletedStartup) result.push(hostname + '.' + domain)
+    const otherSeedServers = allSeedServers
+      .filter(seedServer => seedServer.split('.')[0] !== hostname)
+    const newDetails = {
+      ...details,
+      ...{ seedServers: otherSeedServers.toString() },
+    }
+    nodeDetails.set(hostname, newDetails)
+    console.log(hostname, 'seed servers', otherSeedServers.toString())
   })
-  console.log('seed servers', result.toString())
-  return result
 }
 
 //assign instance to node, return node details
-async function registerInstance(instanceId) {
+function registerInstance(instanceId) {
+  const availableNodes = new Map()
   let result = null
-  let seedServers = getSeedServers()
-
-  let notMatched = true
-  nodeDetails.forEach((details, key) => {
-    const otherBrokers = seedServers
-      .filter(seedServer => seedServer.split('.')[0] !== key)
-    console.log(key, otherBrokers)
-    if(otherBrokers.length === 0 && !details.isPrimary) {
-      // no seed servers available after removing self
-      // if not primary node, make node wait
-      return result
-    }
-    if(details.instanceId.length === 0 && notMatched) {
-      const newDetails = {
-        ...details,
-        ...{
-          instanceId,
-          brokers: brokers.toString(),
-        },
-      }
-      nodeDetails.set(details.hostname, newDetails)
-      result = newDetails
-      notMatched = false
+  // find available nodes
+  nodeDetails.forEach((details, hostname) => {
+    // TODO
+    //console.log(JSON.stringify(details, null, 2))
+    const { instanceId: linkedInstanceId, isPrimary, seedServers } = details
+    //console.log(linkedInstanceId, seedServers?.toString(), isPrimary)
+    if(
+      linkedInstanceId.length === 0 &&
+      ((seedServers.length === 0 && isPrimary) || (seedServers.length > 0 && !isPrimary))
+    ) {
+      availableNodes.set(hostname, details)
     }
   })
-  return result
+  if(availableNodes.size === 0) return result
+  const firstNodeDetails = [...availableNodes.values()][0]
+  const newDetails = {
+    ...firstNodeDetails,
+    ...{ instanceId },
+  }
+  nodeDetails.set(newDetails.hostname, newDetails)
+  return newDetails
 }
 
-let handlingRegistration = ''
-
-fastify.get('/register', async (request, reply) => {
-  const instanceId = request.query.instance_id
-  if(handlingRegistration.length === 0) {
-    handlingRegistration = instanceId
-    if(handlingRegistration !== instanceId) {
-      reply.code(503).header('Content-Type', 'application/text; charset=utf-8')
-      return 'already handling registration'
-    }
-    // get instance id from request
-    const result = await registerInstance(instanceId)
-    if(!result) {
-      reply.code(503).header('Content-Type', 'application/text; charset=utf-8')
-      return 'no seed servers available'
-    }
-    handlingRegistration = ''
-    reply.code(200).header('Content-Type', 'application/json; charset=utf-8')
-    return result
+let handlingRegistration = false
+fastify.get('/register', (request, reply) => {
+  if(handlingRegistration) {
+    console.log('already handling registration')
+    reply.code(503).header('Content-Type', 'application/text; charset=utf-8')
+    return 'already handling registration'
   }
-  reply.code(503).header('Content-Type', 'application/text; charset=utf-8')
-  return 'already handling registration'
+  handlingRegistration = true
+  const instanceId = request.query.instance_id
+  const result = registerInstance(instanceId)
+  if(!result) {
+    console.log('no nodes available')
+    handlingRegistration = false
+    reply.code(503).header('Content-Type', 'application/text; charset=utf-8')
+    return 'no nodes available'
+  }
+  handlingRegistration = false
+  reply.code(200).header('Content-Type', 'application/json; charset=utf-8')
+  return result
 })
 
 fastify.get('/general-info', async (_, reply) => {
   reply.code(200).header('Content-Type', 'application/json; charset=utf-8')
   return generalInfo
-})
-
-// nodes call after volume is ready and are waiting to start
-fastify.get('/can-start', async (request, reply) => {
-  let result = 0
-  const instanceId = request.query.instance_id
-  let primaryNotFound = true
-  let primaryDetails = null
-
-  nodeDetails.forEach((details, key) => {
-    if(details.isPrimary) primaryDetails = details
-    if(instanceId === details.instanceId && !details.isVolumeReady) {
-      const newDetails = {
-        ...details,
-        ...{ isVolumeReady: true },
-      }
-      nodeDetails.set(key, newDetails)
-    }
-  })
-  if(instanceId === primaryDetails.instanceId || primaryDetails.hasCompletedStartup) {
-    result = 1
-  }
-  return result
 })
 
 fastify.get('/completed-startup', async (request, reply) => {
@@ -282,12 +274,9 @@ async function getState(Key) {
       stream.on('error', reject)
       stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
     })
-
   let result = null
-
-  const bucketParams = { Bucket, Key }
   try {
-    const data = await s3Client.send(new GetObjectCommand(bucketParams))
+    const data = await s3Client.send(new GetObjectCommand({ Bucket, Key }))
     const remoteState = await streamToString(data.Body)
     result = remoteState
   } catch (err) {
@@ -295,20 +284,6 @@ async function getState(Key) {
     result = err
   }
   return result
-}
-
-async function setState(Key, Body) {
-  if (typeof Key !== 'string' && Key.length > 0) return 'key must be valid string'
-  if (typeof Body !== 'string' && Body.length > 0) return 'body must be valid string'
-  const params = { Bucket, Key, Body }
-  try {
-    const upload = new Upload({ client: s3Client, params })
-    await upload.done()
-  } catch (err) {
-    console.error('Error', err)
-    result = err
-  }
-  return 'success'
 }
 
 // start server
@@ -319,15 +294,13 @@ try {
   process.exit(1)
 }
 
-/*
- * available:
- * - /public_metrics
- * - TODO kafka API
- */
 async function isNodeAvailable(nodeDetails) {
-  const { adminUrl, hostname } = nodeDetails
+  const { adminUrl } = nodeDetails
+  const url = adminUrl + '/public_metrics'
   try {
-    const response = await fetch(adminUrl + '/public_metrics', { signal })
+    const { statusCode } = await curly.get(url, {
+      TIMEOUT_MS: REQUEST_TIMEOUT_MS,
+    })
     return true
   } catch (err) {
     //console.error(hostname + ' ' + err.name)
@@ -335,35 +308,9 @@ async function isNodeAvailable(nodeDetails) {
   }
 }
 
-/*
- * return true if node is healthy, false otherwise
- * healthy means the node can become available
- * healthy:
- * - EBS volume status
- * - attached to EBS volume
- * - network
- * - instance
- * when is a node unhealthy?
- * - instance is unavailable and not starting or started recently
- * - instance is started but not attached to volume
- */
 async function isNodeHealthy(nodeDetails) {
-  const {
-    nodeId,
-    hostname,
-    volumeId,
-    eip,
-    adminUrl,
-    instanceId,
-    failCount,
-    isPrimary,
-    isVolumeReady,
-    hasCompletedStartup,
-  } = nodeDetails
-
-  if (instanceId.length === 0) {
-    return true
-  }
+  const { instanceId } = nodeDetails
+  if (instanceId.length === 0) return true
 
   // get instance status
   const instanceStatusParams = { InstanceIds: [instanceId] }
@@ -375,8 +322,8 @@ async function isNodeHealthy(nodeDetails) {
     )
     instanceStatus = instanceStatusResult.InstanceStatuses[0]?.InstanceStatus?.Status
     if (!instanceStatus) {
-      console.log(instanceId + ' in unknown state')
-      return true
+      console.log(instanceId + ' doesn\'t exist')
+      return false
     }
   } catch (err) {
     if (err.Code === 'InvalidInstanceID.NotFound') {
@@ -386,32 +333,9 @@ async function isNodeHealthy(nodeDetails) {
   }
 
   // instance is unavailable and either 1) not starting or 2) started recently
-  if (instanceStatus === 'initializing' || instanceStatus === 'ok') return true
+  //if (instanceStatus === 'initializing' || instanceStatus === 'ok') return true
 
-  // get volume status
-  let volumeStatus = null
-  try {
-    const volumeStatusResult = await ec2Client.send(
-      new DescribeVolumesCommand({ VolumeIds: [volumeId] })
-    )
-    // can be: available, creating, deleted, deleting, error, in_use
-    volumeStatus = volumeStatusResult.Volumes[0]?.State
-  } catch (err) {
-    console.error('volume ' + volumeId + ' error', err)
-    return true
-  }
-  if (volumeStatus === 'available') {
-    console.log('instance ' + instanceId + ' and volume ' + volumeId + ' are not yet attached')
-    return false
-  }
-  if (volumeStatus === 'creating') {
-    console.log('volume ' + volumeId + ' is still creating')
-    return true
-  }
-  if (!volumeStatus.includes('-')) {
-    console.log('volume ' + volumeId + ' ' + volumeStatus)
-    return true
-  }
+  return true
 }
 
 async function unlinkAndTerminateInstance(instanceId) {
@@ -426,9 +350,9 @@ async function unlinkAndTerminateInstance(instanceId) {
   // unlink
   for (let i = 0; i < hostnames.length; i++) {
     const details = nodeDetails.get(hostnames[i])
-    const { hostname, eip, instanceId: linkedInstance } = detail
+    const { hostname, instanceId: linkedInstance } = detail
     if (linkedInstance === instanceId) {
-      nodeDetails.set(hostnames[i], {
+      nodeDetails.set(hostname, {
         ...details,
         ...{
           instanceId: '',
@@ -441,24 +365,13 @@ async function unlinkAndTerminateInstance(instanceId) {
   }
 }
 
-/*
- * loop continuously checking node availability and then health
- * availability: whether node responds to admin API requests
- * healthy: status of volume, instance, network
- * if node is available then health check is skipped
- * multiple failed health checks in a row result in instance being terminated
- * causing the ASG to start another instance
- * when to unlink and terminate an instance?
- * - when failure count limit is exceeded
- * what increases failure count?
- * - instance is unavailable and not starting or started recently
- * - instance is started but not attached to volume
- */
 while (true) {
+  await updateSeedServers()
+  await determinePrimaryNode()
   for (let i = 0; i < hostnames.length; i++) {
     const details = nodeDetails.get(hostnames[i])
     const { failCount, hostname, instanceId, adminUrl } = details
-    const isAvailable = await isNodeAvailable(hostname, adminUrl)
+    const isAvailable = await isNodeAvailable(details)
     if (isAvailable) {
       console.log(hostname + ' is available')
       continue
@@ -468,6 +381,11 @@ while (true) {
       console.log(hostname + ' is not available but is healthy')
       continue
     }
+
+    console.log(
+      hostname + ':' + instanceId + ' failed application health check, increasing fail count'
+    )
+    failCount += 1
     if (failCount > HEALTH_CHECK_FAILURE_LIMIT) {
       console.log(
         hostname +
@@ -476,20 +394,8 @@ while (true) {
           ' failed too many application health checks, delinking and terminating instance'
       )
       unlinkAndTerminateInstance(instanceId)
-    } else {
-      console.log(
-        hostname + ':' + instanceId + ' failed application health check, increasing fail count'
-      )
-      const newDetails = {
-        ...details,
-        ...{ failCount: failCount + 1 },
-      }
-      console.log(newDetails)
-      nodeDetails.set(hostname[i], newDetails)
     }
   }
-  getSeedServers()
-  await determinePrimaryNode()
   await sleep(HEALTH_CHECK_FREQUENCY_MS)
   console.log('---')
 }
