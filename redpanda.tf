@@ -105,14 +105,19 @@ resource "aws_iam_instance_profile" "redpanda" {
 resource "aws_launch_configuration" "redpanda" {
   name_prefix                 = "${local.subdomain}-redpanda"
   image_id                    = "ami-0568773882d492fc8"
+  #image_id                    = "ami-058d017bb0407da05"
   instance_type               = "i3.large"
   key_name                    = local.key_name
   iam_instance_profile        = aws_iam_instance_profile.redpanda.name
   security_groups             = [aws_security_group.redpanda.id]
-  associate_public_ip_address = true # TODO is this needed with eip?
+  associate_public_ip_address = true
   user_data                   = templatefile("${path.module}/redpanda-node.sh", {
     BOOTSTRAP_URL = "http://bootstrap.${local.subdomain}.${local.domain}:3000"
   })
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_autoscaling_group" "redpanda" {
