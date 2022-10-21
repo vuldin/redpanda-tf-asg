@@ -1,108 +1,48 @@
 #!/bin/bash
 
 set -ex
-
-yum update -y
-yum install -y jq
-wget -qO /bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-chmod +x /bin/yq
-
-BOOTSTRAP_URL=${BOOTSTRAP_URL}
+#apt update && apt upgrade -y
 
 INSTANCE_ID=`curl -s http://169.254.169.254/latest/meta-data/instance-id`
 REGION=`curl -s http://169.254.169.254/latest/meta-data/placement/region`
 
-until GENERAL_INFO=`curl -sf "$BOOTSTRAP_URL/general-info"`; do
-  sleep 10
-  echo "looping on GENERAL_INFO"
-done
 CLUSTER_ID=`echo $GENERAL_INFO | jq -r '.clusterId'`
 DOMAIN=`echo $GENERAL_INFO | jq -r '.domain'`
 HOSTNAMES=`echo $GENERAL_INFO | jq -r '.hostnames'`
 ORGANIZATION=`echo $GENERAL_INFO | jq -r '.organization'`
 MOUNT_DIR=`echo $GENERAL_INFO | jq -r '.mountDir'`
 
-until INSTANCE_INFO=`curl -sf "$BOOTSTRAP_URL/register?instance_id=$INSTANCE_ID"`; do
-  sleep 10
-  echo "looping on INSTANCE_INFO"
-done
 VOLUME_ID=`echo $INSTANCE_INFO | jq -r '.volumeId'`
 HOSTNAME=`echo $INSTANCE_INFO | jq -r '.hostname'`
 EIP=`echo $INSTANCE_INFO | jq -r '.eip'`
 NODE_ID=`echo $INSTANCE_INFO | jq -r '.nodeId'`
 SEED_SERVERS=`echo $INSTANCE_INFO | jq -r '.seedServers'`
 
-sudo -u ec2-user aws configure set region $REGION
-
-# update DNS
-sudo -u ec2-user aws ec2 associate-address --instance-id "$INSTANCE_ID" --public-ip $EIP
-until [ "`dig +short $HOSTNAME.$DOMAIN`" = "$EIP" ]; do
-  sleep 10
-done
-# TODO update internal DNS entry?
-
-# set instance name
-sudo -u ec2-user aws ec2 create-tags --resources "$INSTANCE_ID" --tags "Key=Name,Value=$CLUSTER_ID-$HOSTNAME"
-
-# ensure volume is available
-until `sudo -u ec2-user aws ec2 describe-volume-status --volume-ids $VOLUME_ID | jq -r '.VolumeStatuses[].VolumeStatus.Status' | grep -q ok`; do
-  sleep 5
-done
-# attach EBS volume
-sudo -u ec2-user aws ec2 attach-volume --volume-id $VOLUME_ID --instance-id $INSTANCE_ID --device /dev/xvdb
-# wait until volume status is ok
-until $(lsblk | grep -q xvdb); do
-  sleep 5
-done
-
-# create mount directory
-mkdir -p $MOUNT_DIR
-
-# determine if volume contents is empty or populated
-if [ "`file -s /dev/xvdb`" = "/dev/xvdb: data" ]; then
-  # empty
-  mkfs.xfs /dev/xvdb
-  mount /dev/xvdb $MOUNT_DIR
-  mkdir $MOUNT_DIR/{config,data}
-  NEW=1
-else
-  # populated
-  mount /dev/xvdb $MOUNT_DIR
-  NEW=0
-fi
-
-# link redpanda data and config directories to volume
-ln -s $MOUNT_DIR/config /etc/redpanda
-ln -s $MOUNT_DIR/data /var/lib/redpanda
-
 # install redpanda
-curl -1sLf https://packages.vectorized.io/sMIXnoa7DK12JW4A/redpanda/cfg/setup/bash.rpm.sh | sudo -E bash
-yum install -y redpanda
+curl -1sLf https://packages.vectorized.io/sMIXnoa7DK12JW4A/redpanda/cfg/setup/bash.deb.sh | sudo -E bash
+apt install -y redpanda
 
 # ensure redpanda user is owner of all related files/directories
-find /etc/redpanda/ /var/lib/redpanda/ $MOUNT_DIR/ -name '*' | xargs -d '\n' chown redpanda:redpanda
+find /etc/redpanda/ /var/lib/redpanda/ -name '*' | xargs -d '\n' chown redpanda:redpanda
 
 # configure redpanda
 INTERNAL_IP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4`
-if [ $NODE_ID -eq 0 ] && [ $NEW -eq 1 ]; then
-  sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP
-else
-  # TODO use load balancer IP for ips flag
-  sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP --ips $SEED_SERVERS
-fi
-sudo -u redpanda rpk redpanda config set cluster_id $CLUSTER_ID
-sudo -u redpanda rpk redpanda config set organization $ORGANIZATION
-sudo -u redpanda rpk redpanda config set redpanda.advertised_kafka_api "[{address: $HOSTNAME.$DOMAIN, port: 9092}]"
-sudo -u redpanda rpk redpanda config set redpanda.advertised_rpc_api "{address: $HOSTNAME.$DOMAIN, port: 33145}"
+
+sudo -u redpanda rpk redpanda config bootstrap --id 0 --self $INTERNAL_IP
+
+sudo -u redpanda rpk redpanda config set cluster_id 'test-cluster'
+sudo -u redpanda rpk redpanda config set organization 'test-org'
+sudo -u redpanda rpk redpanda config set redpanda.advertised_kafka_api "[{address: $INTERNAL_IP, port: 9092}]"
+sudo -u redpanda rpk redpanda config set redpanda.advertised_rpc_api "{address: $INTERNAL_IP, port: 33145}"
+
+sudo -u redpanda rpk cluster config set cloud_storage_bucket update-prefix-variable-redpanda-si-bucket --api-urls 34.220.95.159:9644
+sudo -u redpanda rpk cluster config set cloud_storage_region us-west2 --api-urls 34.220.95.159:9644
+sudo -u redpanda rpk cluster config set cloud_storage_access_key ABCDEFGHIJKLMNOP --api-urls 34.220.95.159:9644
+sudo -u redpanda rpk cluster config set cloud_storage_secret_key 1234567890abcdefghijklmnop --api-urls 34.220.95.159:9644
+sudo -u redpanda rpk cluster config set cloud_storage_enable_remote_read true --api-urls 34.220.95.159:9644
+sudo -u redpanda rpk cluster config set cloud_storage_enable_remote_write true --api-urls 34.220.95.159:9644
+sudo -u redpanda rpk cluster config set cloud_storage_segment_max_upload_interval_sec 30 --api-urls 34.220.95.159:9644
+sudo -u redpanda rpk cluster config set cloud_storage_enabled true --api-urls 34.220.95.159:9644
 
 # start redpanda
 systemctl start redpanda
-
-# if leader, set seed_servers
-#if [ $NODE_ID -eq 0 ]; then
-  # TODO wait until load balancer and at least one other node is available
-  # TODO use load balancer IP for ips flag
-  #sudo -u redpanda rpk redpanda config bootstrap --id $NODE_ID --self $INTERNAL_IP --ips $SEED_SERVERS
-#fi
-
-curl -s "$BOOTSTRAP_URL/completed-startup?instance_id=$INSTANCE_ID"
