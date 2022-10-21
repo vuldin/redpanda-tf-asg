@@ -18,22 +18,12 @@ mkdir bootstrap-node && cd bootstrap-node
 /home/ubuntu/.volta/bin/npm i @aws-sdk/client-ec2 @aws-sdk/client-s3 @aws-sdk/lib-storage fastify node-libcurl
 
 # update DNS
-aws configure set region $REGION
+#aws configure set region $REGION
 
 cat <<EOF > index.js
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
-const sleep = (ms) => {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-const HEALTH_CHECK_FREQUENCY_MS = 10 * 1000
-const HEALTH_CHECK_FAILURE_LIMIT = 3
-const REQUEST_TIMEOUT_MS = 2 * 1000
-
-const region = '$REGION'
 const Bucket = 'prefix-redpanda-si-bucket'
-
 const s3Client = new S3Client({ region })
 
 async function setState(Key, Body) {
@@ -69,7 +59,8 @@ async function getState(Key) {
 }
 
 await setState('test', 'works')
-const clusterId = await getState('test')
+const testVal = await getState('test')
+console.log(testVal)
 
 EOF
 
