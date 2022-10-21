@@ -1,7 +1,7 @@
 #!/bin/bash
 
 set -ex
-yum update -y
+#apt update && apt upgrade -y
 
 # run the rest of this script as ubuntu
 tail -n +$[LINENO+2] $0 | exec sudo -u ubuntu bash
