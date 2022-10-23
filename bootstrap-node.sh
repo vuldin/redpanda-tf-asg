@@ -23,6 +23,7 @@ mkdir bootstrap-node && cd bootstrap-node
 cat <<EOF > index.js
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
+const region = 'us-west-2'
 const Bucket = 'prefix-redpanda-si-bucket'
 const s3Client = new S3Client({ region })
 
